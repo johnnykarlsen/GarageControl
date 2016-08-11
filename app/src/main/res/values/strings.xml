@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">Garage Control</string>
+    <string name="ble_dialog">Bluetooth is necessary for the functionality of the application.</string>
+    <string name="no_garage_stored">No garage stored, please scan and pair!</string>
+    <string name="non_found_scan_dialog">No garage found, scan again?</string>
+    <string name="not_able_to_connect">Not connected, try again?</string>
+    <string name="ok">OK</string>
+    <string name="cancel">CANCEL</string>
+    <string name="action_settings">Settings</string>
+</resources>
