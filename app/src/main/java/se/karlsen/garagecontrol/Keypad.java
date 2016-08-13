@@ -10,13 +10,16 @@ import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.Vibrator;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
 import android.support.v7.widget.Toolbar;
@@ -31,6 +34,7 @@ import android.widget.AdapterView;
 import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import com.google.android.gms.appindexing.Action;
 import com.google.android.gms.appindexing.AppIndex;
@@ -44,24 +48,43 @@ import java.util.UUID;
 
 public class Keypad extends AppCompatActivity {
 
+    private class BluetoothReceiver extends BroadcastReceiver {
+
+        @Override
+        public void onReceive(Context context, Intent intent) {
+
+            if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_OFF) {
+                //mBluetoothAdapter = bluetoothManager.getAdapter();
+                mBluetoothAdapter.enable();
+                Log.v(TAG,"Trying to enable again");
+            } else if (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON)
+                Log.v(TAG,"Enabled, trying to connect again");
+                connectToGarage();
+        }
+    }
+
     private BluetoothAdapter mBluetoothAdapter;
     private BluetoothLeScanner mBluetoothScanner;
     private boolean mScanning = false;
     private Handler mHandler;
     private BluetoothDevice mGarage = null;
     private BluetoothGatt mGarageGatt = null;
+    private BluetoothGattService mPortService = null;
     private boolean mGarageConnected = false;
     private AlertDialog mDialog = null;
     private ImageView mFlashConnect = null;
     private Animation mBlinkAnimation = null;
     private KeyAdapter mKeyAdapter = null;
     private byte[] mPassWordBytes = null;
+    private long mStartToConnectTime = 0;
+    private BluetoothReceiver mBluetoothReceiver = null;
 
     private static final int REQUEST_ENABLE_BT = 1;
     private static final int REQUEST_ENABLE_BT_AGAIN = 2;
     private static final int FAIL_TO_CONNECT = 3;
     private static final int SUCCESS_TO_CONNECT = 4;
     private static final int SUCCESS_TO_DISCONNECT = 5;
+    private static final int INCORRECT_PASSWORD = 6;
     private static final int NONCE_LENGTH = 20;
     private static final int PASSWORD_LENGTH = 6;
     private static final long SCAN_PERIOD = 10000;
@@ -121,6 +144,10 @@ public class Keypad extends AppCompatActivity {
                 (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
         mBluetoothAdapter = bluetoothManager.getAdapter();
 
+        mBluetoothReceiver = new BluetoothReceiver();
+        IntentFilter filter = new IntentFilter("android.bluetooth.adapter.action.STATE_CHANGED");
+        registerReceiver(mBluetoothReceiver, filter);
+
         //Create animation for the connection indication
         mBlinkAnimation = new AlphaAnimation(1,0);
         mBlinkAnimation.setDuration(500);
@@ -136,9 +163,20 @@ public class Keypad extends AppCompatActivity {
                 switch (in.what) {
 
                     case FAIL_TO_CONNECT:
+                        //Try to handle some race/malfunction in the stack
+                        //If the time between start of connect try and callback is to short do it over again
+                        if (System.currentTimeMillis() - mStartToConnectTime < 1000) {
+                            Log.v(TAG,"Short time between connect and fail, reset Bluetooth");
+                            mBluetoothAdapter.disable();
+                            Toast.makeText(getApplicationContext(),R.string.bluetooth_reset, Toast.LENGTH_SHORT).show();
+                            Log.v(TAG,"VVVVVVVVVVVVV");
+                            break;
+                            //Log.v(TAG,"YYYYYYYYYYY");
+                        }
+                        Log.v(TAG,"XXXXXXXXXXXXXX");
                         mFlashConnect.clearAnimation();
                         mFlashConnect.setVisibility(View.INVISIBLE);
-                    //    mKeyAdapter.alterForwardKey(KeyAdapter.GREY);
+                        mKeyAdapter.alterForwardKey(KeyAdapter.GREY);
                         mGarageConnected = false;
                         AlertDialog.Builder builder = new AlertDialog.Builder(Keypad.this);
                         builder.setMessage(R.string.not_able_to_connect);
@@ -167,6 +205,11 @@ public class Keypad extends AppCompatActivity {
                         break;
                     case SUCCESS_TO_DISCONNECT:
                         mKeyAdapter.alterForwardKey(KeyAdapter.GREY);
+                        break;
+                    case INCORRECT_PASSWORD:
+                        Vibrator vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+                        vibrator.vibrate(500);
+                        Toast.makeText(getApplicationContext(),R.string.incorrect_password, Toast.LENGTH_SHORT).show();
                 }
             }
         };
@@ -220,8 +263,9 @@ public class Keypad extends AppCompatActivity {
         //Close any open dialogs
         if (mDialog != null)
             mDialog.dismiss();
-        if (mGarageGatt != null)
+        if (mGarageGatt != null) {
             mGarageGatt.disconnect();
+        }
     }
 
     @Override
@@ -394,6 +438,7 @@ public class Keypad extends AppCompatActivity {
                         Message successToDisconnectMessage = mHandler.obtainMessage(SUCCESS_TO_DISCONNECT);
                         successToDisconnectMessage.sendToTarget();
                         mGarageGatt.close();
+                        Log.v(TAG,"A successful disconnect");
                     }
                 } else {
                     if (newState == BluetoothGatt.STATE_CONNECTED) {
@@ -404,6 +449,7 @@ public class Keypad extends AppCompatActivity {
                         Message failToConnectMessage = mHandler.obtainMessage(FAIL_TO_CONNECT);
                         failToConnectMessage.sendToTarget();
                         mGarageGatt.close();
+                        Log.v(TAG,"Failed connection attempt or lost connection");
                     }
                 }
             }
@@ -413,16 +459,26 @@ public class Keypad extends AppCompatActivity {
             public void onCharacteristicRead(BluetoothGatt gatt,
                                              BluetoothGattCharacteristic characteristic,
                                              int status) {
+
                 Log.v(TAG, Integer.toString(status));
                 if (status == BluetoothGatt.GATT_SUCCESS) {
-                    byte[] result = calculateHash(characteristic.getValue());
-                    Log.v(TAG, (new String(result)));
-                    Log.v(TAG, "Length of hash:" + Integer.toString(result.length));
-                    if (result != null) {
-                        characteristic.setValue(result);
-                        characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
-                        boolean test = mGarageGatt.writeCharacteristic(characteristic);
-                        Log.v(TAG, Boolean.toString(test));
+                    if (characteristic.getUuid().equals(new UUID(CHAR_VALID_PASSWORD_UUID_MSB, CHAR_VALID_PASSWORD_UUID_LSB))) {
+                        Log.v(TAG, "Confirm value: ");
+                        Log.v(TAG, Byte.toString(characteristic.getValue()[0]));
+                        if (characteristic.getValue()[0] == 0) {
+                            Message incorrectPasswordMessage = mHandler.obtainMessage(INCORRECT_PASSWORD);
+                            incorrectPasswordMessage.sendToTarget();
+                        }
+                    } else {
+                        byte[] result = calculateHash(characteristic.getValue());
+                        Log.v(TAG, (new String(result)));
+                        Log.v(TAG, "Length of hash:" + Integer.toString(result.length));
+                        if (result != null) {
+                            characteristic.setValue(result);
+                            characteristic.setWriteType(BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT);
+                            boolean test = mGarageGatt.writeCharacteristic(characteristic);
+                            Log.v(TAG, Boolean.toString(test));
+                        }
                     }
                 }
             }
@@ -435,6 +491,14 @@ public class Keypad extends AppCompatActivity {
                     byte[] result;
                     result = characteristic.getValue();
                     Log.v(TAG, (new String(result)));
+                    if (mPortService !=null) {
+                        UUID charUuid = new UUID(CHAR_VALID_PASSWORD_UUID_MSB, CHAR_VALID_PASSWORD_UUID_LSB);
+                        BluetoothGattCharacteristic portPasswordConfirmCharacteristic = mPortService.getCharacteristic(charUuid);
+                        if (portPasswordConfirmCharacteristic != null) {
+                            //This is a request for password validity
+                            boolean res = mGarageGatt.readCharacteristic(portPasswordConfirmCharacteristic);
+                        }
+                    }
                 }
             }
 
@@ -443,41 +507,24 @@ public class Keypad extends AppCompatActivity {
 
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     UUID serviceUuid = new UUID(SERVICE_UUID_MSB,SERVICE_UUID_LSB);
-                    BluetoothGattService portService = gatt.getService(serviceUuid);
-                    if (portService !=null) {
-                        UUID charUuid = new UUID(CHAR_UUID_MSB,CHAR_UUID_LSB);
-                        BluetoothGattCharacteristic portCharacteristic = portService.getCharacteristic(charUuid);
+                    mPortService = gatt.getService(serviceUuid);
+                    if (mPortService !=null) {
+                        UUID charUuid = new UUID(CHAR_UUID_MSB, CHAR_UUID_LSB);
+                        BluetoothGattCharacteristic portCharacteristic = mPortService.getCharacteristic(charUuid);
                         if (portCharacteristic != null) {
                             //This is a request for the challenge
                             boolean res = mGarageGatt.readCharacteristic(portCharacteristic);
-                            //if (res)
                         }
                     }
                 }
-                //List<BluetoothGattService> services = gatt.getServices();
-                //Log.i("onServicesDiscovered", services.toString());
-
-                //BluetoothGattCharacteristic ch = services.get(2).getCharacteristics().get(0);
-                //Log.v(TAG, ch.getUuid().toString());
-                //Log.v(TAG, ch.getService().getUuid().toString());
-                //boolean test = mGarageGatt.readCharacteristic(ch);
-                //Log.v(TAG, Boolean.toString(test));
-
-                /*for (int i = 0; i < services.size(); i++) {
-                    Log.v(TAG, services.get(i).getCharacteristics().get(0).getUuid().toString());
-                    Log.v(TAG, Integer.toString(services.get(i).getCharacteristics().get(0).getProperties()));
-                    Log.v(TAG, Integer.toString(services.get(i).getCharacteristics().get(0).getPermissions()));
-                    //Log.v(TAG, Integer.toString(services.get(2).getCharacteristic(new UUID(0xc2f0a001d15e8fa4L,0xaa4d0fe7cf8b0d22L)).getProperties()));
-                    //Log.v(TAG, Integer.toString(services.get(2).getCharacteristic(new UUID(0xc2f0a001d15e8fa4L,0xaa4d0fe7cf8b0d22L)).getPermissions()));
-                    //Log.v(TAG, Integer.toString(services.get(2).getCharacteristic(new UUID(0xc2f0a001d15e8fa4L,0xaa4d0fe7cf8b0d22L)).getProperties()));
-                }*/
             }
         };
 
         Log.v(TAG, "Trying to connect");
         mFlashConnect.setVisibility(View.VISIBLE);
         mFlashConnect.startAnimation(mBlinkAnimation);
-        mGarageGatt = mGarage.connectGatt(this, false, mBGCallback);
+        mGarageGatt = mGarage.connectGatt(this, false, mBGCallback);                //Starting connect attempt
+        mStartToConnectTime = System.currentTimeMillis();                           //Store start time
     }
 
     @Override

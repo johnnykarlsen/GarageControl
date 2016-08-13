@@ -6,5 +6,7 @@
     <string name="not_able_to_connect">Not connected, try again?</string>
     <string name="ok">OK</string>
     <string name="cancel">CANCEL</string>
+    <string name="bluetooth_reset">Bluetooth failed, resetting Bluetooth</string>
+    <string name="incorrect_password">Incorrect password!!</string>
     <string name="action_settings">Settings</string>
 </resources>
